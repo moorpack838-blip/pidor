@@ -549,4 +549,443 @@ def get_all_cases_admin(page: int = 0, per_page: int = 10):
 
 # ==================== Games ====================
 
-def create_game(player1_id: int, player2_id: int, 
+def create_game(player1_id: int, player2_id: int, skin_x: str = 'X', skin_o: str = 'O'):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO games (player1_id, player2_id, current_turn, skin_x, skin_o, status)
+        VALUES (?, ?, ?, ?, ?, 'active')
+    """, (player1_id, player2_id, player1_id, skin_x, skin_o))
+    game_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return game_id
+
+def get_game(game_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM games WHERE game_id = ?", (game_id,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def get_active_game(user_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT * FROM games
+        WHERE (player1_id = ? OR player2_id = ?) AND status = 'active'
+        ORDER BY game_id DESC LIMIT 1
+    """, (user_id, user_id))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def make_move(game_id: int, user_id: int, position: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM games WHERE game_id = ?", (game_id,))
+    game = dict(c.fetchone())
+    if game['current_turn'] != user_id:
+        conn.close()
+        return False, "Не ваш ход"
+    board = list(game['board'])
+    if board[position] != '-':
+        conn.close()
+        return False, "Клетка занята"
+    symbol = 'X' if user_id == game['player1_id'] else 'O'
+    board[position] = symbol
+    board_str = ''.join(board)
+    winner = check_winner(board_str)
+    next_turn = game['player2_id'] if user_id == game['player1_id'] else game['player1_id']
+    if winner == 'X':
+        winner_id = game['player1_id']
+        c.execute("UPDATE games SET board=?, status='finished', winner_id=? WHERE game_id=?",
+                  (board_str, winner_id, game_id))
+    elif winner == 'O':
+        winner_id = game['player2_id']
+        c.execute("UPDATE games SET board=?, status='finished', winner_id=? WHERE game_id=?",
+                  (board_str, winner_id, game_id))
+    elif '-' not in board_str:
+        c.execute("UPDATE games SET board=?, status='finished', winner_id=NULL WHERE game_id=?",
+                  (board_str, game_id))
+        winner = 'draw'
+    else:
+        c.execute("UPDATE games SET board=?, current_turn=? WHERE game_id=?",
+                  (board_str, next_turn, game_id))
+    conn.commit()
+    conn.close()
+    return True, winner
+
+def check_winner(board: str):
+    lines = [
+        (0,1,2),(3,4,5),(6,7,8),
+        (0,3,6),(1,4,7),(2,5,8),
+        (0,4,8),(2,4,6)
+    ]
+    b = list(board)
+    for a, bb, cc in lines:
+        if b[a] != '-' and b[a] == b[bb] == b[cc]:
+            return b[a]
+    return None
+
+def add_to_matchmaking(user_id: int, elo: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO matchmaking (user_id, elo, joined_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+              (user_id, elo))
+    conn.commit()
+    conn.close()
+
+def remove_from_matchmaking(user_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM matchmaking WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def find_match(user_id: int, elo: int, range_delta: int = 300):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT * FROM matchmaking
+        WHERE user_id != ? AND ABS(elo - ?) <= ?
+        ORDER BY ABS(elo - ?) ASC, joined_at ASC
+        LIMIT 1
+    """, (user_id, elo, range_delta, elo))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+# ==================== Friends ====================
+
+def add_friend(user_id: int, friend_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO friends (user_id, friend_id) VALUES (?, ?)", (user_id, friend_id))
+    conn.commit()
+    conn.close()
+
+def get_friends(user_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT u.* FROM users u
+        JOIN friends f ON f.friend_id = u.user_id
+        WHERE f.user_id = ?
+    """, (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+# ==================== Admin ====================
+
+def get_all_users(page: int = 0, per_page: int = 10):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users ORDER BY elo DESC LIMIT ? OFFSET ?", (per_page, page * per_page))
+    rows = c.fetchall()
+    total = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    conn.close()
+    return [dict(r) for r in rows], total
+
+def get_all_user_ids():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users")
+    rows = c.fetchall()
+    conn.close()
+    return [r['user_id'] for r in rows]
+
+def admin_set_coins(user_id: int, amount: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("UPDATE users SET coins = ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+    conn.close()
+
+def admin_set_elo(user_id: int, elo: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("UPDATE users SET elo = ? WHERE user_id = ?", (elo, user_id))
+    conn.commit()
+    conn.close()
+
+def admin_cancel_game(game_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("UPDATE games SET status='cancelled', admin_cancelled=1 WHERE game_id=?", (game_id,))
+    conn.commit()
+    conn.close()
+
+def get_all_skins_admin(page: int = 0, per_page: int = 10):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT s.*, u.username as creator_username
+        FROM skins s
+        LEFT JOIN users u ON s.creator_id = u.user_id
+        ORDER BY s.skin_id DESC
+        LIMIT ? OFFSET ?
+    """, (per_page, page * per_page))
+    rows = c.fetchall()
+    total = c.execute("SELECT COUNT(*) FROM skins").fetchone()[0]
+    conn.close()
+    return [dict(r) for r in rows], total
+
+def get_all_games_admin(page: int = 0, per_page: int = 10):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT g.*,
+               u1.username as p1_username,
+               u2.username as p2_username
+        FROM games g
+        LEFT JOIN users u1 ON g.player1_id = u1.user_id
+        LEFT JOIN users u2 ON g.player2_id = u2.user_id
+        ORDER BY g.game_id DESC
+        LIMIT ? OFFSET ?
+    """, (per_page, page * per_page))
+    rows = c.fetchall()
+    total = c.execute("SELECT COUNT(*) FROM games").fetchone()[0]
+    conn.close()
+    return [dict(r) for r in rows], total
+
+def delete_skin_admin(skin_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM skins WHERE skin_id = ?", (skin_id,))
+    c.execute("DELETE FROM user_skins WHERE skin_id = ?", (skin_id,))
+    c.execute("DELETE FROM market WHERE skin_id = ?", (skin_id,))
+    conn.commit()
+    conn.close()
+
+# ==================== Group Duels ====================
+
+def register_group_chat(tg_chat_id: int, name: str, chat_type: str = "group"):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT OR IGNORE INTO group_chats (tg_chat_id, name, type)
+        VALUES (?, ?, ?)
+    """, (tg_chat_id, name, chat_type))
+    conn.commit()
+    conn.close()
+
+def get_group_chat(tg_chat_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM group_chats WHERE tg_chat_id = ?", (tg_chat_id,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def create_group_duel(tg_chat_id: int, challenger_id: int, message_id: int, elo_bet: int = 0, coin_bet: int = 0):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO group_duels (tg_chat_id, challenger_id, status, message_id, elo_bet, coin_bet)
+        VALUES (?, ?, 'waiting', ?, ?, ?)
+    """, (tg_chat_id, challenger_id, message_id, elo_bet, coin_bet))
+    duel_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return duel_id
+
+def get_group_duel(duel_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM group_duels WHERE duel_id = ?", (duel_id,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def get_active_duel_in_group(tg_chat_id: int, user_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT * FROM group_duels 
+        WHERE tg_chat_id = ? AND status = 'active'
+        AND (challenger_id = ? OR opponent_id = ?)
+        ORDER BY created_at DESC LIMIT 1
+    """, (tg_chat_id, user_id, user_id))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def accept_duel(duel_id: int, opponent_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        UPDATE group_duels 
+        SET opponent_id = ?, status = 'active', current_turn = challenger_id
+        WHERE duel_id = ?
+    """, (opponent_id, duel_id))
+    conn.commit()
+    conn.close()
+
+def duel_make_move(duel_id: int, user_id: int, position: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM group_duels WHERE duel_id = ?", (duel_id,))
+    duel = dict(c.fetchone())
+    
+    if duel['current_turn'] != user_id:
+        conn.close()
+        return False, "Не ваш ход"
+    
+    board = list(duel['board'])
+    if board[position] != '-':
+        conn.close()
+        return False, "Клетка занята"
+    
+    symbol = 'X' if user_id == duel['challenger_id'] else 'O'
+    board[position] = symbol
+    board_str = ''.join(board)
+    
+    winner = check_winner(board_str)
+    next_turn = duel['opponent_id'] if user_id == duel['challenger_id'] else duel['challenger_id']
+    
+    if winner == 'X':
+        winner_id = duel['challenger_id']
+        c.execute("""
+            UPDATE group_duels 
+            SET board=?, status='finished', winner_id=?, current_turn=NULL
+            WHERE duel_id=?
+        """, (board_str, winner_id, duel_id))
+    elif winner == 'O':
+        winner_id = duel['opponent_id']
+        c.execute("""
+            UPDATE group_duels 
+            SET board=?, status='finished', winner_id=?, current_turn=NULL
+            WHERE duel_id=?
+        """, (board_str, winner_id, duel_id))
+    elif '-' not in board_str:
+        c.execute("""
+            UPDATE group_duels 
+            SET board=?, status='finished', winner_id=NULL, current_turn=NULL
+            WHERE duel_id=?
+        """, (board_str, duel_id))
+        winner = 'draw'
+    else:
+        c.execute("""
+            UPDATE group_duels 
+            SET board=?, current_turn=?
+            WHERE duel_id=?
+        """, (board_str, next_turn, duel_id))
+    
+    conn.commit()
+    conn.close()
+    return True, winner
+
+def cancel_duel(duel_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("UPDATE group_duels SET status='cancelled' WHERE duel_id = ?", (duel_id,))
+    conn.commit()
+    conn.close()
+
+# ==================== Chats ====================
+
+def create_chat(name: str, creator_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO chats (name, created_by)
+        VALUES (?, ?)
+    """, (name, creator_id))
+    chat_id = c.lastrowid
+    c.execute("INSERT INTO chat_members (chat_id, user_id) VALUES (?, ?)", (chat_id, creator_id))
+    conn.commit()
+    conn.close()
+    return chat_id
+
+def get_user_chats(user_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT c.* FROM chats c
+        JOIN chat_members cm ON c.chat_id = cm.chat_id
+        WHERE cm.user_id = ?
+        ORDER BY c.created_at DESC
+    """, (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_chat(chat_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM chats WHERE chat_id = ?", (chat_id,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def add_chat_member(chat_id: int, user_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO chat_members (chat_id, user_id) VALUES (?, ?)", (chat_id, user_id))
+    conn.commit()
+    conn.close()
+
+def is_chat_member(chat_id: int, user_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    result = c.fetchone() is not None
+    conn.close()
+    return result
+
+def get_chat_members(chat_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT u.* FROM users u
+        JOIN chat_members cm ON u.user_id = cm.user_id
+        WHERE cm.chat_id = ?
+    """, (chat_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def send_chat_message(chat_id: int, user_id: int, text: str = "", file_id: str = "", file_type: str = ""):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO chat_messages (chat_id, user_id, text, file_id, file_type)
+        VALUES (?, ?, ?, ?, ?)
+    """, (chat_id, user_id, text, file_id, file_type))
+    msg_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return msg_id
+
+def get_chat_messages(chat_id: int, limit: int = 50):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT m.*, u.username, u.display_name FROM chat_messages m
+        JOIN users u ON m.user_id = u.user_id
+        WHERE m.chat_id = ?
+        ORDER BY m.created_at DESC
+        LIMIT ?
+    """, (chat_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in reversed(rows)]
+
+def remove_chat_member(chat_id: int, user_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    conn.commit()
+    conn.close()
+
+def delete_chat(chat_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM chat_messages WHERE chat_id = ?", (chat_id,))
+    c.execute("DELETE FROM chat_members WHERE chat_id = ?", (chat_id,))
+    c.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
